@@ -41,6 +41,76 @@ local ERROR_CODES = {
 }
 
 -- ============================================================
+-- UTF-8 安全字符串操作模块
+-- ============================================================
+
+local function utf8charlen(b)
+    if b < 0x80 then return 1 end
+    if b < 0xC0 then return 1 end
+    if b < 0xE0 then return 2 end
+    return 3
+end
+
+local function utf8len(str)
+    local len = 0
+    local i = 1
+    while i <= #str do
+        len = len + 1
+        i = i + utf8charlen(str:byte(i))
+    end
+    return len
+end
+
+local function utf8sub(str, charStart, charEnd)
+    if charStart < 1 then charStart = 1 end
+    local byteStart = 1
+    local charIdx = 1
+    while charIdx < charStart and byteStart <= #str do
+        byteStart = byteStart + utf8charlen(str:byte(byteStart))
+        charIdx = charIdx + 1
+    end
+    if charEnd then
+        local byteEnd = byteStart
+        local endIdx = charStart
+        while endIdx < charEnd and byteEnd <= #str do
+            byteEnd = byteEnd + utf8charlen(str:byte(byteEnd))
+            endIdx = endIdx + 1
+        end
+        if byteEnd <= #str then
+            local nextByte = byteEnd + utf8charlen(str:byte(byteEnd))
+            return str:sub(byteStart, nextByte - 1)
+        else
+            return str:sub(byteStart)
+        end
+    else
+        return str:sub(byteStart)
+    end
+end
+
+local function utf8chars(str)
+    local i = 0
+    local bytePos = 1
+    return function()
+        if bytePos > #str then return nil end
+        local charLen = utf8charlen(str:byte(bytePos))
+        local ch = str:sub(bytePos, bytePos + charLen - 1)
+        i = i + 1
+        bytePos = bytePos + charLen
+        return i, ch
+    end
+end
+
+local function utf8bytepos(str, charPos)
+    local bytePos = 1
+    local charIdx = 1
+    while charIdx < charPos and bytePos <= #str do
+        bytePos = bytePos + utf8charlen(str:byte(bytePos))
+        charIdx = charIdx + 1
+    end
+    return bytePos
+end
+
+-- ============================================================
 -- 工具函数
 -- ============================================================
 
@@ -172,21 +242,29 @@ end
 -- 图层操作
 -- ============================================================
 
-local function buildHierarchyIndex(sprite)
-    local indexMap = {}
-    local counter = 0
-    local function traverse(layers)
-        for i = 1, #layers do
-            local layer = layers[i]
-            counter = counter + 1
-            indexMap[layer] = counter
-            if layer.isGroup and layer.layers and #layer.layers > 0 then
-                traverse(layer.layers)
-            end
+local function getLayerChain(layer)
+    local chain = {}
+    local current = layer
+    while current do
+        table.insert(chain, 1, current.stackIndex)
+        local parent = current.parent
+        if parent == nil then break end
+        if parent == current.sprite then break end
+        current = parent
+    end
+    return chain
+end
+
+local function compareLayerOrder(layerA, layerB)
+    local chainA = getLayerChain(layerA)
+    local chainB = getLayerChain(layerB)
+    local minLen = math.min(#chainA, #chainB)
+    for i = 1, minLen do
+        if chainA[i] ~= chainB[i] then
+            return chainA[i] > chainB[i]
         end
     end
-    traverse(sprite.layers)
-    return indexMap
+    return #chainA < #chainB
 end
 
 local function getLayerTypeTag(layer)
@@ -225,7 +303,6 @@ end
 
 local function buildLayerData(sprite)
     local selectedLayers = getSelectedLayers(sprite)
-    local hierarchyIndex = buildHierarchyIndex(sprite)
 
     local layerData = {}
     for _, layer in ipairs(selectedLayers) do
@@ -237,21 +314,19 @@ local function buildLayerData(sprite)
             isTilemap = layer.isTilemap or false,
             isBackground = layer.isBackground or false,
             isEditable = isLayerEditable(layer),
-            hierarchyIndex = hierarchyIndex[layer] or 0,
             variables = {},
             newName = nil,
         })
     end
 
     table.sort(layerData, function(a, b)
-        return a.hierarchyIndex > b.hierarchyIndex
+        return compareLayerOrder(a.layer, b.layer)
     end)
 
     return layerData
 end
 
 local function expandLayerDataWithChildren(baseLayerData, sprite)
-    local hierarchyIndex = buildHierarchyIndex(sprite)
     local seen = {}
     local result = {}
 
@@ -274,7 +349,6 @@ local function expandLayerDataWithChildren(baseLayerData, sprite)
                             isTilemap = child.isTilemap or false,
                             isBackground = child.isBackground or false,
                             isEditable = isLayerEditable(child),
-                            hierarchyIndex = hierarchyIndex[child] or 0,
                             variables = {},
                             newName = nil,
                         })
@@ -289,7 +363,7 @@ local function expandLayerDataWithChildren(baseLayerData, sprite)
     end
 
     table.sort(result, function(a, b)
-        return a.hierarchyIndex > b.hierarchyIndex
+        return compareLayerOrder(a.layer, b.layer)
     end)
 
     return result
@@ -301,47 +375,63 @@ end
 
 local function commonPrefix(strings)
     if #strings == 0 then return "" end
-    local prefix = strings[1]
+    local charCount = utf8len(strings[1])
     for i = 2, #strings do
-        while true do
-            if #prefix == 0 then return "" end
-            if strings[i]:sub(1, #prefix) == prefix then break end
-            prefix = prefix:sub(1, #prefix - 1)
-        end
+        local len = utf8len(strings[i])
+        if len < charCount then charCount = len end
     end
-    return prefix
+    while charCount > 0 do
+        local prefix = utf8sub(strings[1], 1, charCount)
+        local match = true
+        for i = 2, #strings do
+            if utf8sub(strings[i], 1, charCount) ~= prefix then
+                match = false
+                break
+            end
+        end
+        if match then return prefix end
+        charCount = charCount - 1
+    end
+    return ""
 end
 
 local function commonSuffix(strings)
     if #strings == 0 then return "" end
-    local suffix = strings[1]
+    local charCount = utf8len(strings[1])
     for i = 2, #strings do
-        while #suffix > 0 do
-            local sLen = #suffix
-            local strLen = #strings[i]
-            if strLen >= sLen and strings[i]:sub(strLen - sLen + 1) == suffix then
+        local len = utf8len(strings[i])
+        if len < charCount then charCount = len end
+    end
+    while charCount > 0 do
+        local suffix = utf8sub(strings[1], utf8len(strings[1]) - charCount + 1)
+        local match = true
+        for i = 2, #strings do
+            if utf8sub(strings[i], utf8len(strings[i]) - charCount + 1) ~= suffix then
+                match = false
                 break
             end
-            suffix = suffix:sub(2)
         end
-        if #suffix == 0 then return "" end
+        if match then return suffix end
+        charCount = charCount - 1
     end
-    return suffix
+    return ""
 end
 
 local function findLCS(strings)
     if #strings == 0 then return "" end
     local shortest = strings[1]
     for i = 2, #strings do
-        if #strings[i] < #shortest then shortest = strings[i] end
+        if utf8len(strings[i]) < utf8len(shortest) then shortest = strings[i] end
     end
     if #shortest == 0 then return "" end
 
+    local shortestLen = utf8len(shortest)
     local best = ""
-    for start = 1, #shortest do
-        for endPos = #shortest, start + #best, -1 do
-            local sub = shortest:sub(start, endPos)
-            if #sub <= #best then break end
+    for start = 1, shortestLen do
+        local bestCharLen = utf8len(best)
+        for endPos = shortestLen, start + bestCharLen, -1 do
+            local sub = utf8sub(shortest, start, endPos)
+            if utf8len(sub) <= bestCharLen then break end
             local found = true
             for i = 1, #strings do
                 if not strings[i]:find(sub, 1, true) then
@@ -372,18 +462,20 @@ local function buildPatternRecursive(strings, nextVar)
     if allEmpty then return { expression = "", varCount = nextVar - 1 } end
 
     local prefix = commonPrefix(strings)
+    local prefixCharLen = utf8len(prefix)
 
     local remaining = {}
     for i = 1, #strings do
-        table.insert(remaining, strings[i]:sub(#prefix + 1))
+        table.insert(remaining, utf8sub(strings[i], prefixCharLen + 1))
     end
     local suffix = commonSuffix(remaining)
+    local suffixCharLen = utf8len(suffix)
 
     local middle = {}
     for i = 1, #strings do
-        local s = strings[i]
-        local midEnd = #s - #suffix
-        table.insert(middle, s:sub(#prefix + 1, midEnd))
+        local sCharLen = utf8len(strings[i])
+        local midEndChar = sCharLen - suffixCharLen
+        table.insert(middle, utf8sub(strings[i], prefixCharLen + 1, midEndChar))
     end
 
     local allMiddleSame = true
