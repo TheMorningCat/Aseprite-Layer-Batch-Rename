@@ -1,5 +1,5 @@
 -- ============================================================
--- Aseprite 批量重命名图层 v1.0.0
+-- Aseprite 批量重命名图层 v1.0.2
 -- 功能：批量重命名选中图层，支持模式检测、变量替换和序号生成
 -- ============================================================
 
@@ -8,7 +8,7 @@
 -- ============================================================
 
 local SCRIPT_NAME = "批量重命名图层"
-local SCRIPT_VERSION = "1.0.0"
+local SCRIPT_VERSION = "1.0.2"
 local ERROR_LOG_FILE = "LayerBatchRename_ErrorLog.txt"
 local VAR_CHARS = "1234567890abcefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 local MAX_VARS = #VAR_CHARS
